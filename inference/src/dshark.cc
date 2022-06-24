@@ -1203,9 +1203,6 @@ void ModelInstanceState::Execute(
     IREE_LOG(INFO) << "can't find return buffer view";
   }
 
-  // I want to do this is a seperate function that calls after execute in
-  // process tensors I'm doing it like this for now so I can get a demo running
-
   BackendOutputResponder responder(
       requests, request_count, responses, model_state_->TritonMemoryManager(),
       false, false /* pinned_enabled */, nullptr /* stream*/);
@@ -1213,7 +1210,7 @@ void ModelInstanceState::Execute(
   uint32_t output_count;
   TRITONBACKEND_RequestOutputCount(requests[0], &output_count);
 
-  for (iree_host_size_t i = 0; i < iree_vm_list_size(output_tensors); ++i) {
+  for (iree_host_size_t i = 0; i < output_count; ++i) {
 
     iree_vm_variant_t variant = iree_vm_variant_empty();
     IREE_CHECK_OK(iree_vm_list_get_variant(output_tensors, i, &variant));
