@@ -1,124 +1,147 @@
 # Lint as: python3
 """SHARK Importer"""
 
-import iree.compiler.tflite as iree_tflite_compile
-import iree.runtime as iree_rt
-import numpy as np
-import os
 import sys
-import tensorflow.compat.v2 as tf
-import urllib.request
-from shark.shark_inference import SharkInference
+
+# List of the supported frontends.
+supported_frontends = {
+    "tensorflow",
+    "tf",
+    "pytorch",
+    "torch",
+    "tf-lite",
+    "tflite",
+}
 
 
 class SharkImporter:
+    """
+    SharkImporter converts frontend modules into a
+    mlir_module. The supported frameworks are tensorflow,
+    pytorch, and tf-lite.
 
-    def __init__(self,
-                 model_path,
-                 model_type: str = "tflite",
-                 model_source_hub: str = "tfhub",
-                 device: str = None,
-                 dynamic: bool = False,
-                 jit_trace: bool = False,
-                 benchmark_mode: bool = False):
-        self.model_path = model_path
-        self.model_type = model_type
-        self.model_source_hub = model_source_hub
-        self.device = device
-        self.dynamic = dynamic
-        self.jit_trace = jit_trace
-        self.benchmark_mode = benchmark_mode
-        self.inputs = None
-        self.input_details = None
-        self.output_details = None
+    ...
 
-        # create tmp model file directory
-        if self.model_path is None:
-            print("Error. No model_path, Please input model path.")
-            return
+    Attributes
+    ----------
+    module :
+        torch, tensorflow or tf-lite module.
+    inputs :
+        inputs to the module, may be required for the shape
+        information.
+    frontend: str
+        frontend to which the module belongs.
+    raw_model_file: str
+        temp tflite model path
 
-        if self.model_source_hub == "tfhub":
-            # compile and run tfhub tflite
-            if self.model_type == "tflite":
-                print("Setting up for TMP_DIR")
-                exe_basename = os.path.basename(sys.argv[0])
-                self.workdir = os.path.join(os.path.dirname(__file__), "tmp",
-                                            exe_basename)
-                print(f"TMP_DIR = {self.workdir}")
-                os.makedirs(self.workdir, exist_ok=True)
-                self.tflite_file = '/'.join([self.workdir, 'model.tflite'])
-                print("Setting up local address for tflite model file: ",
-                      self.tflite_file)
-                if os.path.exists(self.model_path):
-                    self.tflite_file = self.model_path
-                else:
-                    print("Download tflite model")
-                    urllib.request.urlretrieve(self.model_path,
-                                               self.tflite_file)
-                print("Setting up tflite interpreter")
-                self.tflite_interpreter = tf.lite.Interpreter(
-                    model_path=self.tflite_file)
-                self.tflite_interpreter.allocate_tensors()
-                # default input initialization
-                self.input_details, self.output_details = self.get_model_details(
-                )
-                inputs = self.generate_inputs(
-                    self.input_details)  # device_inputs
-                self.setup_inputs(inputs)
+    Methods
+    -------
+    import_mlir(is_dynamic, tracing_required, func_name):
+        is_dynamic: input shapes to be totally dynamic (pytorch specific).
+        tracing_required: whether tracing is required (pytorch specific.
+        func_name: The function to be traced out or imported to mlir.
 
-    def generate_inputs(self, input_details):
-        args = []
-        for input in input_details:
-            print(str(input["shape"]), input["dtype"].__name__)
-            args.append(np.zeros(shape=input["shape"], dtype=input["dtype"]))
-        return args
+    import_debug(is_dynamic, tracing_required, func_name):
+        returns the converted (mlir_module,func_name) with inputs and golden
+        outputs.
+        The inputs and outputs are converted into np array.
+    """
 
-    def get_model_details(self):
-        if self.model_type == "tflite":
-            print("Get tflite input output details")
-            self.input_details = self.tflite_interpreter.get_input_details()
-            self.output_details = self.tflite_interpreter.get_output_details()
-            return self.input_details, self.output_details
+    def __init__(
+        self,
+        module,
+        inputs: tuple = (),
+        frontend: str = "torch",
+        raw_model_file: str = "",
+    ):
+        self.module = module
+        self.inputs = None if len(inputs) == 0 else inputs
+        self.frontend = frontend
+        if not self.frontend in supported_frontends:
+            print(f"The frontend is not in the supported_frontends: {supported_frontends}")
+            sys.exit(1)
+        self.raw_model_file = raw_model_file
 
-    def setup_inputs(self, inputs):
-        print("Setting up inputs")
-        self.inputs = inputs
+    # NOTE: The default function for torch is "forward" and tf-lite is "main".
 
-    def compile(self, inputs=None):
-        if inputs is not None:
-            self.setup_inputs(inputs)
-        # preprocess model_path to get model_type and Model Source Hub
-        print("Shark Importer Intialize SharkInference and Do Compile")
-        if self.model_source_hub == "tfhub":
-            # compile and run tfhub tflite
-            print("Inference tfhub model")
-            self.shark_module = SharkInference(self.tflite_file,
-                                               self.inputs,
-                                               device=self.device,
-                                               dynamic=self.dynamic,
-                                               jit_trace=self.jit_trace)
-            self.shark_module.set_frontend("tflite")
-            self.shark_module.compile()
-        elif self.model_source_hub == "huggingface":
-            print("Inference", self.model_source_hub, " not implemented yet")
-        elif self.model_source_hub == "jaxhub":
-            print("Inference", self.model_source_hub, " not implemented yet")
+    def _torch_mlir(self, is_dynamic, tracing_required):
+        from shark.torch_mlir_utils import get_torch_mlir_module
 
-    def forward(self, inputs=None):
-        if inputs is not None:
-            self.setup_inputs(inputs)
-        # preprocess model_path to get model_type and Model Source Hub
-        print("Shark Importer forward Model")
-        if self.model_source_hub == "tfhub":
-            shark_results = self.shark_module.forward(self.inputs)
-            # Fix type information for unsigned cases.
-            # for test compare result
-            shark_results = list(shark_results)
-            for i in range(len(self.output_details)):
-                dtype = self.output_details[i]["dtype"]
-                shark_results[i] = shark_results[i].astype(dtype)
-            return shark_results
-        elif self.model_source_hub == "huggingface":
-            print("Inference", self.model_source_hub, " not implemented yet")
-        elif self.model_source_hub == "jaxhub":
-            print("Inference", self.model_source_hub, " not implemented yet")
+        return get_torch_mlir_module(self.module, self.inputs, is_dynamic, tracing_required)
+
+    def _tf_mlir(self, func_name):
+        from iree.compiler import tf as tfc
+
+        return tfc.compile_module(self.module, exported_names=[func_name], import_only=True)
+
+    def _tflite_mlir(self, func_name):
+        from iree.compiler import tflite as tflitec
+        from shark.iree_utils._common import IREE_TARGET_MAP
+
+        self.mlir_model = tflitec.compile_file(
+            self.raw_model_file,  # in tflite, it is a path to .tflite file, not a tflite interpreter
+            input_type="tosa",
+            import_only=True,
+        )
+        return self.mlir_model
+
+    # Adds the conversion of the frontend with the private function.
+    def import_mlir(
+        self,
+        is_dynamic=False,
+        tracing_required=False,
+        func_name="forward",
+    ):
+        if self.frontend in ["torch", "pytorch"]:
+            if self.inputs == None:
+                print("Please pass in the inputs, the inputs are required to determine the shape of the mlir_module")
+                sys.exit(1)
+            return self._torch_mlir(is_dynamic, tracing_required), func_name
+        if self.frontend in ["tf", "tensorflow"]:
+            return self._tf_mlir(func_name), func_name
+        if self.frontend in ["tflite", "tf-lite"]:
+            func_name = "main"
+            return self._tflite_mlir(func_name), func_name
+
+    # Converts the frontend specific tensors into np array.
+    def convert_to_numpy(self, array_tuple: tuple):
+        if self.frontend in ["torch", "pytorch"]:
+            return [x.detach().numpy() for x in array_tuple]
+        if self.frontend in ["tf", "tensorflow"]:
+            return [x.numpy() for x in array_tuple]
+
+    def import_debug(
+        self,
+        is_dynamic=False,
+        tracing_required=False,
+        func_name="forward",
+    ):
+        if self.inputs == None:
+            print(f"There is no input provided: {self.inputs}, please provide inputs or simply run import_mlir.")
+            sys.exit(1)
+
+        imported_mlir = self.import_mlir(is_dynamic, tracing_required, func_name)
+        # TODO: Make sure that any generic function name is accepted. Currently takes in the default function names.
+        # TODO: Check for multiple outputs.
+        if self.frontend in ["torch", "pytorch"]:
+            golden_out = self.module(*self.inputs)
+            return (
+                imported_mlir,
+                self.convert_to_numpy(self.inputs),
+                golden_out.detach().numpy(),
+            )
+        if self.frontend in ["tf", "tensorflow"]:
+            golden_out = self.module.forward(*self.inputs)
+            return (
+                imported_mlir,
+                self.convert_to_numpy(self.inputs),
+                golden_out.numpy(),
+            )
+        if self.frontend in ["tflite", "tf-lite"]:
+            # TODO(Chi): Validate it for tflite models.
+            golden_out = self.module.invoke_tflite(self.inputs)
+            return (
+                imported_mlir,
+                self.inputs,
+                golden_out,
+            )

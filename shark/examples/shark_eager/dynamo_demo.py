@@ -15,9 +15,7 @@ NUM_ITERS = 10
 
 
 def __torch_mlir(fx_graph, *args, **kwargs):
-    assert isinstance(
-        fx_graph, torch.fx.GraphModule
-    ), "Model must be an FX GraphModule."
+    assert isinstance(fx_graph, torch.fx.GraphModule), "Model must be an FX GraphModule."
 
     def _unwrap_single_tuple_return(fx_g: torch.fx.GraphModule):
         """Replace tuple with tuple element in functions that return one-element tuples."""

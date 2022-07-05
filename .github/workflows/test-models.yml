@@ -1,7 +1,7 @@
 # This workflow will install Python dependencies, run tests and lint with a variety of Python versions
 # For more information see: https://help.github.com/actions/language-and-framework-guides/using-python-with-github-actions
 
-name: Validate torch-models on Shark Runtime
+name: Validate Models on Shark Runtime
 
 on:
   push:
@@ -11,92 +11,86 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-linux:
-
-    runs-on: ubuntu-latest
+  build-validate:
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
+        os: [a100, MacStudio, ubuntu-latest]
+        suite: [cpu,gpu,vulkan]
         python-version: ["3.10"]
+        include:
+          - os: ubuntu-latest
+            suite: lint
+        exclude:
+          - os: ubuntu-latest
+            suite: vulkan
+          - os: ubuntu-latest
+            suite: gpu
+          - os: ubuntu-latest
+            suite: cpu
+          - os: MacStudio
+            suite: gpu
+          - os: MacStudio
+            suite: vulkan
+
+    runs-on: ${{ matrix.os }}
 
     steps:
     - uses: actions/checkout@v3
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v3
-      with:
-        python-version: ${{ matrix.python-version }}
     
-    - name: Setup pip cache
-      uses: actions/cache@v3
+    - name: Set up Python Version File ${{ matrix.python-version }}
+      if: matrix.os == 'a100' ||  matrix.os == 'ubuntu-latest'
+      run: |
+        # See https://github.com/actions/setup-python/issues/433
+        echo ${{ matrix.python-version }} >> $GITHUB_WORKSPACE/.python-version
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      if: matrix.os == 'a100' ||  matrix.os == 'ubuntu-latest'
+      uses: actions/setup-python@v4
       with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
-
+        python-version: '${{ matrix.python-version }}'
+        #cache: 'pip'
+        #cache-dependency-path: |
+        #  **/requirements-importer.txt
+        #  **/requirements.txt
+          
     - name: Install dependencies
+      if: matrix.suite == 'lint'
       run: |
         python -m pip install --upgrade pip
-        python -m pip install flake8 pytest yapf toml
-
+        python -m pip install flake8 pytest toml black
+        
     - name: Lint with flake8
+      if: matrix.suite == 'lint'
       run: |
+        # black format check
+        black --version
+        black --line-length 127 --check .
         # stop the build if there are Python syntax errors or undefined names
         flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exclude lit.cfg.py
         # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
         flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics --exclude lit.cfg.py
-        yapf -i --style .style.yapf shark/*.py
 
-    - name: Validate Models
+    - name: Validate CPU Models
+      if: matrix.suite == 'cpu'
       run: |
         cd $GITHUB_WORKSPACE
-        IMPORTER=1 ./setup_venv.sh
+        PYTHON=python${{ matrix.python-version }} IMPORTER=1 ./setup_venv.sh
         source shark.venv/bin/activate
-        pytest -k 'not benchmark' --ignore=tank/tf/ --ignore=shark/tests/test_shark_importer.py
-        
-  perf-macOS:
-    runs-on: MacStudio
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.10"]
+        pytest -n 2 -k 'not benchmark'  --ignore=shark/tests/test_shark_importer.py --ignore=tank/tf/  --ignore=benchmarks/tests/test_hf_benchmark.py --ignore=benchmarks/tests/test_benchmark.py 
 
-    steps:
-    - uses: actions/checkout@v3   
-    - name: Validate Models dependencies
+    - name: Validate GPU Models
+      if: matrix.suite == 'gpu'
       run: |
         cd $GITHUB_WORKSPACE
-        PYTHON=python3.10 IMPORTER=1 ./setup_venv.sh
+        PYTHON=python${{ matrix.python-version }} IMPORTER=1 ./setup_venv.sh
         source shark.venv/bin/activate
-        pytest -k 'not benchmark' --ignore=benchmarks/tests/test_hf_benchmark.py --ignore=benchmarks/tests/test_benchmark.py --ignore=tank/tf/ --ignore=shark/tests/test_shark_importer.py 
-        
-  perf-linux:
-    runs-on: a100
-    timeout-minutes: 45
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.10"]
+        pytest -k 'gpu' --ignore=shark/tests/test_shark_importer.py --ignore=benchmarks/tests/test_hf_benchmark.py --ignore=benchmarks/tests/test_benchmark.py 
 
-    steps:
-    - uses: actions/checkout@v3
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v3
-      with:
-        python-version: ${{ matrix.python-version }}
-    
-    - name: Setup pip cache
-      uses: actions/cache@v3
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
-
-    - name: Validate Models
+    - name: Validate Vulkan Models
+      if: matrix.suite == 'vulkan'
       run: |
         cd $GITHUB_WORKSPACE
-        IMPORTER=1 ./setup_venv.sh
+        PYTHON=python${{ matrix.python-version }} IMPORTER=1 ./setup_venv.sh
         source shark.venv/bin/activate
-        pytest --ignore=shark/tests/test_shark_importer.py --ignore=tank/tf/
+        pytest -k 'vulkan' --ignore=shark/tests/test_shark_importer.py --ignore=benchmarks/tests/test_hf_benchmark.py --ignore=benchmarks/tests/test_benchmark.py
