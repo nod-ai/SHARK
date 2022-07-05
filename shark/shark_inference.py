@@ -9,107 +9,111 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from shark.torch_mlir_utils import get_torch_mlir_module, run_on_refbackend
-import os
-from shark.parser import shark_args
-from shark.shark_runner import SharkRunner, SharkBenchmarkRunner
-import time
-import sys
+from shark.shark_runner import SharkRunner
+import numpy as np
 
 
-# Prints to stderr.
-def print_err(*a):
-    print(*a, file=sys.stderr)
+dtype_to_np_dtype = {
+    "f32": np.float32,
+    "f64": np.float64,
+    "i32": np.int32,
+    "i64": np.int64,
+    "i1": np.bool_,
+}
 
 
 class SharkInference:
-    """Inference API targeting pytorch, tensorflow, linalg, mhlo and tosa frontend."""
+    """
+    Runs prediction or inference on mlir_module.
 
-    def __init__(self,
-                 model,
-                 input: tuple,
-                 device: str = None,
-                 dynamic: bool = False,
-                 jit_trace: bool = False,
-                 benchmark_mode: bool = False):
-        self.model = model
-        self.input = input
-        self.dynamic = dynamic
-        self.jit_trace = jit_trace
-        self.benchmark_mode = benchmark_mode
+    ...
 
-        # By default it's torch frontend.
-        self.frontend = "pytorch"
+    Attributes
+    ----------
+    mlir_module : str
+        mlir_module represented in string.
+    function_name : str
+        function to execute in the given mlir_module.
+    device : str
+        device to execute the mlir_module on.
+        currently supports cpu, cuda, vulkan, and metal backends.
+    mlir_dialect: str
+        The dialect in which the given mlir_module is in.
+        Refer to {https://mlir.llvm.org/docs/Dialects/}
 
-        # Sets the device.
-        self.device = device if device is not None else shark_args.device
+    Methods
+    -------
+    run(inputs=None):
+        Runs the mlir_module with the given inputs, if the inputs are not
+        given it autogenerates the inputs. Also, the inputs should be a
+        numpy array.
+    input_info():
+        Gives the information about the inputs required by the `function_name`.
+        This can be expensive as it does string matching to do so.
 
-        self.model_config_path = shark_args.model_config_path
+        TODO(Stanley) Add the benchmark APIs with is_benchmark = True argument.
+    """
+
+    def __init__(
+        self,
+        mlir_module: str,
+        function_name: str = "forward",
+        device: str = "cpu",
+        mlir_dialect: str = "linalg",
+    ):
+        self.mlir_module = mlir_module
+        self.function_name = function_name
+        self.device = device
+        self.mlir_dialect = mlir_dialect
 
         self.shark_runner = None
 
-    # Sets the frontend i.e `pytorch` or `tensorflow`.
-    def set_frontend(self, frontend: str):
-        if frontend not in [
-                "pytorch", "torch", "tensorflow", "tf", "mhlo", "linalg",
-                "tosa", "tflite"
-        ]:
-            print_err("frontend not supported.")
-        else:
-            self.frontend = frontend
-
     def compile(self):
-        # Inference do not use AOT.
-        from_aot = False
-        if (self.benchmark_mode == True):
-            self.shark_runner = SharkBenchmarkRunner(self.model, self.input,
-                                                     self.dynamic, self.device,
-                                                     self.jit_trace, from_aot,
-                                                     self.frontend)
-        else:
-            self.shark_runner = SharkRunner(self.model, self.input,
-                                            self.dynamic, self.device,
-                                            self.jit_trace, from_aot,
-                                            self.frontend,
-                                            self.model_config_path)
+        # TODO: (Stanley) Update the shark_benchmark APIs.
+        self.shark_runner = SharkRunner(
+            self.mlir_module,
+            self.function_name,
+            self.device,
+            self.mlir_dialect,
+        )
 
-    # inputs are considered to be np.array.
-    def forward(self, inputs):
-        input_list = inputs
-        # converts the inputs to numpy.
-        if self.frontend in ["pytorch", "torch"]:
-            input_list = [x.detach().numpy() for x in inputs]
-        elif self.frontend in ["tensorflow", "tf"]:
-            input_list = [x.numpy() for x in inputs]
-        return self.shark_runner.forward(input_list, self.frontend)
+    # inputs are considered to be tuple of np.array.
+    def forward(self, inputs: tuple):
+        return self.shark_runner.run(inputs)
 
-    # Saves the .vmfb module.
-    def save_module(self, dir = None):
-        if dir is None:
-            return self.shark_runner.save_module()
-        return self.shark_runner.save_module(dir)
+    # Captures the static input information from the mlir_module.
+    # TODO(pashu123): Generate the input information for dynamic shapes.
+    def _input_info(self):
+        # func_key to get the line which contains the function.
+        func_key = "func.func @" + self.function_name
+        func_header = None
+        for line in str(self.mlir_module).splitlines():
+            if func_key in line:
+                func_header = line
+                break
+        if func_header is None:
+            print(f"Function: {self.function_name} not found")
 
-    ######### Benchmark Related Functions #########
-    def benchmark_mode(func):
+        import re
 
-        def inner(self, *args, **kwargs):
-            assert self.benchmark_mode, "SharkRunner needs to be in benchmark mode to run benchmark methods."
-            return func(self, *args, **kwargs)
+        inputs = re.findall("\(.*?\)", func_header)[0].split(",")
+        shapes = []
+        dtype = []
+        for inp in inputs:
+            shape_dtype = re.findall(r"<[^>]*>", inp)[0].split("x")
+            shape_dtype[0], shape_dtype[-1] = (
+                shape_dtype[0][1:],
+                shape_dtype[-1][:-1],
+            )
+            shapes.append(tuple([int(x) for x in shape_dtype[:-1]]))
+            dtype.append(shape_dtype[-1])
 
-        return inner
+        return shapes, dtype
 
-    @benchmark_mode
-    def benchmark_all(self, inputs):
-        self.shark_runner.benchmark_all(inputs)
-
-    @benchmark_mode
-    def benchmark_frontend(self, inputs):
-        self.shark_runner.benchmark_frontend(inputs)
-
-    @benchmark_mode
-    def benchmark_python(self, inputs):
-        self.shark_runner.benchmark_python(inputs)
-
-    @benchmark_mode
-    def benchmark_c(self):
-        self.shark_runner.benchmark_c()
+    # Generates random input to be feed into the graph.
+    def generate_random_inputs(self, low=0, high=1):
+        shapes, dtype = self._input_info()
+        inputs = []
+        for i, j in zip(shapes, dtype):
+            inputs.append(np.random.uniform(low, high, size=i).astype(dtype_to_np_dtype[j]))
+        return tuple(inputs)

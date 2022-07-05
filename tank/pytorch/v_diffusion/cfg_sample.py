@@ -10,9 +10,7 @@ from tqdm import trange
 try:
     from diffusion import get_model, sampling, utils
 except ModuleNotFoundError:
-    print(
-        "You need to download v-diffusion source from https://github.com/crowsonkb/v-diffusion-pytorch"
-    )
+    print("You need to download v-diffusion source from https://github.com/crowsonkb/v-diffusion-pytorch")
     raise
 
 torch.manual_seed(0)
@@ -51,7 +49,8 @@ clip_model_name = model.clip_model if hasattr(model, "clip_model") else "ViT-B/1
 clip_model = clip.load(clip_model_name, jit=False, device=device)[0]
 clip_model.eval().requires_grad_(False)
 normalize = transforms.Normalize(
-    mean=[0.48145466, 0.4578275, 0.40821073], std=[0.26862954, 0.26130258, 0.27577711]
+    mean=[0.48145466, 0.4578275, 0.40821073],
+    std=[0.26862954, 0.26130258, 0.27577711],
 )
 
 zero_embed = torch.zeros([1, clip_model.visual.output_dim], device=device)
@@ -86,9 +85,7 @@ def repro(model):
     steps = utils.get_spliced_ddpm_cosine_schedule(t)
     for i in trange(0, args.n, args.batch_size):
         cur_batch_size = min(args.n - i, args.batch_size)
-        outs = sampling.plms_sample(
-            partial(cfg_model_fn, model), x[i : i + cur_batch_size], steps, {}
-        )
+        outs = sampling.plms_sample(partial(cfg_model_fn, model), x[i : i + cur_batch_size], steps, {})
         for j, out in enumerate(outs):
             utils.to_pil_image(out).save(f"out_{i + j:05}.png")
 

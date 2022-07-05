@@ -11,195 +11,85 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from iree.compiler import tf as tfc
-import iree.compiler.tflite as ireec_tflite
-from torch.utils._python_dispatch import enable_torch_dispatch_mode
-from torch_mlir.eager_mode import torch_mlir_tensor
-from torch_mlir.eager_mode.torch_mlir_tensor import TorchMLIRTensor
-from torch_mlir_e2e_test.eager_backends.refbackend import EagerModeRefBackend
 
-from shark.iree_eager_backend import EagerModeIREELinalgOnTensorsBackend
-from shark.torch_mlir_utils import get_torch_mlir_module, run_on_refbackend
-from shark.iree_utils import get_results, get_iree_compiled_module, export_iree_module_to_vmfb, export_module_to_mlir_file, build_benchmark_args, run_benchmark_module
+from shark.iree_utils.compile_utils import (
+    get_iree_compiled_module,
+    get_results,
+    export_iree_module_to_vmfb,
+)
+from shark.iree_utils._common import check_device_drivers, device_driver_info
 import os
-from shark.parser import shark_args
-from tqdm import tqdm
-import time
+import sys
+
+
+# supported dialects by the shark-runtime.
+supported_dialects = {"linalg", "mhlo", "tosa", "tf-lite"}
 
 
 class SharkRunner:
-    """Base class for Shark Inference and Shark Runner."""
+    """
+    Base class for SharkInference and SharkTrainer
+    used to execute an mlir_module.
+
+    ...
+
+    Attributes
+    ----------
+    mlir_module : str
+        mlir_module represented in string.
+    function_name : str
+        function to execute in the given mlir_module.
+    device : str
+        device to execute the mlir_module on.
+        currently supports cpu, cuda, vulkan, and metal backends.
+    mlir_dialect: str
+        The dialect in which the given mlir_module is in.
+        Refer to {https://mlir.llvm.org/docs/Dialects/}
+
+    Methods
+    -------
+    run(inputs=None):
+        Runs the mlir_module with the given inputs, if the inputs are not
+        given it autogenerates the inputs. Also, the inputs should be a
+        numpy array.
+    input_info():
+        Gives the information about the inputs required by the `function_name`.
+        This can be expensive as it does string matching to do so.
+    """
 
     def __init__(
         self,
-        model,
-        input: tuple,
-        dynamic: bool = False,
-        device: str = None,
-        jit_trace: bool = False,
-        from_aot: bool = False,
-        frontend: str = "torch",
-        model_config_path: str = None,
+        mlir_module: str,
+        function_name: str = "forward",
+        device: str = "cpu",
+        mlir_dialect: str = "linalg",
     ):
-        self.model = model
-        self.frontend_model = model
-        self.from_aot = from_aot
-        self.input = input
-        self.frontend = frontend
-        self.vmfb_file = None
-        func_name = "forward"
-        self.device = device if device is not None else shark_args.device
-        if self.frontend in ["pytorch", "torch"]:
-            # get torch-mlir dialect
-            # self.model = torch.Module
-            # TODO assert
-            self.model = get_torch_mlir_module(self.model, input, dynamic,
-                                               jit_trace, from_aot)
-        elif self.frontend in ["tensorflow", "tf"]:
-            # get mhlo dialect
-            # self.model = tf.Module
-            # TODO assert
-            self.model = tfc.compile_module(self.model,
-                                            exported_names=[func_name],
-                                            import_only=True)
-        elif self.frontend in ["tflite"]:
-            print("Setting up for IREE compiler tflite")
-            # get tosa dialect
-            # self.model = model.tflite
-            # TODO assert
-            self.model = ireec_tflite.compile_file(self.model,
-                                                   input_type="tosa",
-                                                   import_only=True)
-            func_name = "main"
+        self.mlir_module = mlir_module
+        self.function_name = function_name
+        self.device = device
+        self.mlir_dialect = mlir_dialect
 
-        # TODO: We can capture the .vmfb module here and later use it for saving
-        # rather than recompiling it again, if used for saving.
-        (
+        if check_device_drivers(self.device):
+            device_driver_info(self.device)
+            sys.exit(1)
+
+        # Compile the module to get the .vmfb.
+        (self.iree_compilation_module, self.iree_config,) = get_iree_compiled_module(
+            self.mlir_module,
+            self.device,
+            self.mlir_dialect,
+            func_name=self.function_name,
+        )
+
+    def run(self, inputs: tuple):
+        return get_results(
             self.iree_compilation_module,
+            inputs,
             self.iree_config,
-        ) = get_iree_compiled_module(self.model,
-                                     self.device,
-                                     self.frontend,
-                                     func_name=func_name,
-                                     model_config_path=model_config_path)
-
-        # Debugging Options:
-        if shark_args.save_mlir:
-            export_module_to_mlir_file(self.model, self.frontend,
-                                       shark_args.repro_dir)
-        if shark_args.save_vmfb:
-            self.vmfb_file = self.save_module(shark_args.repro_dir)
-
-    # All the timings and benchmarking can be done here.
-    def forward(self, input, frontend):
-        return get_results(self.iree_compilation_module, input,
-                           self.iree_config, frontend)
+            self.mlir_dialect,
+        )
 
     # TODO: Instead of passing directory and having names decided by the module
     # , user may want to save the module with manual names.
     def save_module(self, dir=os.getcwd()):
-        return export_iree_module_to_vmfb(self.model, self.device, dir,
-                                          self.frontend)
-
-    # TODO: Load a module and directly use it, we will need to set the frontend
-    # in this case.
-    def load_module(self, name):
-        pass
-
-
-class SharkEagerMode:
-
-    def __init__(self, device="cpu"):
-        if device == "refbackend":
-            torch_mlir_tensor.backend = EagerModeRefBackend()
-        else:
-            torch_mlir_tensor.backend = EagerModeIREELinalgOnTensorsBackend(
-                device)
-        self.guard = enable_torch_dispatch_mode(TorchMLIRTensor)
-        self.guard.__enter__()
-
-    def __del__(self):
-        self.guard.__exit__(None, None, None)
-
-
-class SharkBenchmarkRunner(SharkRunner):
-    # SharkRunner derived class with Benchmarking capabilities.
-    def __init__(
-        self,
-        model,
-        input: tuple,
-        dynamic: bool = False,
-        device: str = None,
-        jit_trace: bool = False,
-        from_aot: bool = False,
-        frontend: str = "torch",
-    ):
-        SharkRunner.__init__(self, model, input, dynamic, device, jit_trace,
-                             from_aot, frontend)
-        if (self.vmfb_file == None):
-            self.vmfb_file = export_iree_module_to_vmfb(self.model, device,
-                                                        shark_args.repro_dir,
-                                                        frontend)
-        self.benchmark_cl = build_benchmark_args(self.vmfb_file, device, input,
-                                                 frontend, from_aot)
-
-    def benchmark_frontend(self, inputs):
-        if self.frontend in ["pytorch", "torch"]:
-            self.benchmark_torch(inputs)
-        elif self.frontend in ["tensorflow", "tf"]:
-            self.benchmark_tf(inputs)
-
-    def benchmark_torch(self, inputs):
-        inputs = self.input if self.from_aot else inputs
-        inputs = inputs[0]
-        for i in range(shark_args.num_warmup_iterations):
-            self.frontend_model.forward(inputs)
-
-        begin = time.time()
-        for i in range(shark_args.num_iterations):
-            out = self.frontend_model.forward(inputs)
-            if i == shark_args.num_iterations - 1:
-                end = time.time()
-                break
-        print(
-            f"Torch benchmark:{shark_args.num_iterations/(end-begin)} iter/second, Total Iterations:{shark_args.num_iterations}"
-        )
-
-    def benchmark_tf(self, inputs):
-        for i in range(shark_args.num_warmup_iterations):
-            self.frontend_model.forward(*inputs)
-
-        begin = time.time()
-        for i in range(shark_args.num_iterations):
-            out = self.frontend_model.forward(*inputs)
-            if i == shark_args.num_iterations - 1:
-                end = time.time()
-                break
-        print(
-            f"TF benchmark:{shark_args.num_iterations/(end-begin)} iter/second, Total Iterations:{shark_args.num_iterations}"
-        )
-        return
-
-    def benchmark_c(self):
-        result = run_benchmark_module(self.benchmark_cl)
-        print(f"Shark-{self.frontend} C-benchmark:{result} iter/second")
-
-    def benchmark_python(self, inputs):
-        inputs = self.input if self.from_aot else inputs
-        input_list = [x for x in inputs]
-        for i in range(shark_args.num_warmup_iterations):
-            self.forward(input_list, self.frontend)
-
-        begin = time.time()
-        for i in range(shark_args.num_iterations):
-            out = self.forward(input_list, self.frontend)
-            if i == shark_args.num_iterations - 1:
-                end = time.time()
-        print(
-            f"Shark-{self.frontend} Python-benchmark:{shark_args.num_iterations/(end-begin)} iter/second, Total Iterations:{shark_args.num_iterations}"
-        )
-
-    def benchmark_all(self, inputs):
-        self.benchmark_frontend(inputs)
-        self.benchmark_python(inputs)
-        self.benchmark_c()
+        return export_iree_module_to_vmfb(self.model, self.device, dir, self.mlir_dialect)

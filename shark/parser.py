@@ -20,52 +20,59 @@ def dir_path(path):
     if os.path.isdir(path):
         return path
     else:
-        raise argparse.ArgumentTypeError(
-            f"readable_dir:{path} is not a valid path")
+        os.mkdir(path)
+        return path
 
 
 def dir_file(path):
     if os.path.isfile(path):
         return path
     else:
-        raise argparse.ArgumentTypeError(
-            f"readable_file:{path} is not a valid file")
+        raise argparse.ArgumentTypeError(f"readable_file:{path} is not a valid file")
 
 
-parser = argparse.ArgumentParser(description='SHARK runner.')
+parser = argparse.ArgumentParser(description="SHARK runner.")
 parser.add_argument(
     "--device",
     type=str,
     default="cpu",
-    help="Device on which shark_runner runs. options are cpu, gpu, and vulkan")
+    help="Device on which shark_runner runs. options are cpu, gpu, and vulkan",
+)
 parser.add_argument(
     "--repro_dir",
-    help=
-    "Directory to which module files will be saved for reproduction or debugging.",
+    help="Directory to which module files will be saved for reproduction or debugging.",
     type=dir_path,
-    default="/tmp/")
-parser.add_argument("--save_mlir",
-                    default=False,
-                    action="store_true",
-                    help="Saves input MLIR module to /tmp/ directory.")
-parser.add_argument("--save_vmfb",
-                    default=False,
-                    action="store_true",
-                    help="Saves iree .vmfb module to /tmp/ directory.")
+    default="./shark_tmp",
+)
+parser.add_argument(
+    "--save_mlir",
+    default=False,
+    action="store_true",
+    help="Saves input MLIR module to /tmp/ directory.",
+)
+parser.add_argument(
+    "--save_vmfb",
+    default=False,
+    action="store_true",
+    help="Saves iree .vmfb module to /tmp/ directory.",
+)
 parser.add_argument(
     "--model_config_path",
     help="Directory to where the tuned model config file is located.",
-    default=None)
+    default=None,
+)
 
 parser.add_argument(
     "--num_warmup_iterations",
     type=int,
     default=2,
-    help="Run the model for the specified number of warmup iterations.")
+    help="Run the model for the specified number of warmup iterations.",
+)
 parser.add_argument(
     "--num_iterations",
     type=int,
     default=1,
-    help="Run the model for the specified number of iterations.")
+    help="Run the model for the specified number of iterations.",
+)
 
 shark_args, unknown = parser.parse_known_args()
