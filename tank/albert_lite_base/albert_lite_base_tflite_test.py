@@ -4,7 +4,6 @@ from shark.shark_inference import SharkInference
 import pytest
 import unittest
 from shark.parser import shark_args
-from shark.tflite_utils import TFLitePreprocessor
 
 
 # model_path = "https://tfhub.dev/tensorflow/lite-model/albert_lite_base/squadv1/1?lite-format=tflite"
